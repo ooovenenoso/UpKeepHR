@@ -1,0 +1,11 @@
+import assert from "node:assert/strict";
+import {execFileSync} from "node:child_process";
+import {db} from "../src/lib/db";
+import {createBackup} from "../src/lib/logical-backup";
+import {databaseSchema} from "../src/lib/config";
+assert.equal(databaseSchema,"hhrr_test");
+const count=await db.employee.count(),files=await db.attachment.findMany({select:{sha256:true}});
+let result=await createBackup();while(result.status!=="COMPLETE")result=await createBackup();
+execFileSync(process.execPath,["--import","tsx","scripts/restore-test.ts","--manifest",`${result.path}/manifest.json`],{stdio:"inherit"});
+assert.equal(await db.employee.count(),count);assert.deepEqual((await db.attachment.findMany({select:{sha256:true}})).map(f=>f.sha256).sort(),files.map(f=>f.sha256).sort());assert.equal(await db.authSession.count(),0);
+console.log("Recuperación comprobada: misma cantidad de empleados y hashes de archivos; sesiones revocadas; producción intacta.");await db.$disconnect();

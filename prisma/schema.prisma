@@ -1,0 +1,377 @@
+generator client {
+  provider = "prisma-client"
+  output = "../src/generated/prisma"
+}
+datasource db {
+  provider = "postgresql"
+}
+model Employee {
+  user PlatformUser?
+  id String @id @default(uuid())
+  cpid String @unique
+  name String
+  lastNames String
+  email String
+  role String @default("EMPLOYEE")
+  site String
+  position String
+  hireDate String
+  active Boolean @default(true)
+  source String @default("MANUAL")
+  legacyData String?
+  supervisorId String?
+  supervisor Employee? @relation("Team", fields: [supervisorId], references: [id])
+  team Employee[] @relation("Team")
+  createdAt DateTime @default(now())
+  assignments Assignment[]
+  cycles Cycle[]
+  obligations Obligation[]
+  submissions Submission[]
+  sessions Session[]
+  @@map("hhrr_employees")
+}
+model DocumentType {
+  id String @id @default(uuid())
+  code String @unique
+  name String
+  description String
+  instructions String
+  active Boolean @default(true)
+  autoAssign Boolean @default(true)
+  rules Rule[]
+  assignments Assignment[]
+  cycles Cycle[]
+  obligations Obligation[]
+  @@map("hhrr_documents")
+}
+model Rule {
+  id String @id @default(uuid())
+  documentTypeId String
+  documentType DocumentType @relation(fields: [documentTypeId], references: [id])
+  version Int
+  expiryMode String
+  validityMonths Int?
+  initialDays Int @default(30)
+  calendarMode String @default("CLAMP")
+  reviewMonths Int?
+  reviewCount Int?
+  reviewTargetId String?
+  reminders String @default("[10,5,0]")
+  overdueDays Int @default(7)
+  sites String @default("[]")
+  positions String @default("[]")
+  createdAt DateTime @default(now())
+  assignments Assignment[]
+  cycles Cycle[]
+  obligations Obligation[]
+  @@unique([documentTypeId, version])
+  @@map("hhrr_document_rules")
+}
+model Assignment {
+  id String @id @default(uuid())
+  employeeId String
+  employee Employee @relation(fields: [employeeId], references: [id])
+  documentTypeId String
+  documentType DocumentType @relation(fields: [documentTypeId], references: [id])
+  ruleId String
+  rule Rule @relation(fields: [ruleId], references: [id])
+  active Boolean @default(true)
+  assignedDate String
+  obligations Obligation[]
+  @@unique([employeeId, documentTypeId])
+  @@map("hhrr_assignments")
+}
+model Cycle {
+  id String @id @default(uuid())
+  employeeId String
+  employee Employee @relation(fields: [employeeId], references: [id])
+  documentTypeId String
+  documentType DocumentType @relation(fields: [documentTypeId], references: [id])
+  ruleId String
+  rule Rule @relation(fields: [ruleId], references: [id])
+  issueDate String?
+  expiresDate String?
+  verified Boolean @default(true)
+  active Boolean @default(true)
+  origin String @default("APPROVAL")
+  createdAt DateTime @default(now())
+  obligations Obligation[]
+  @@map("hhrr_cycles")
+}
+model Obligation {
+  id String @id @default(uuid())
+  key String @unique
+  employeeId String
+  employee Employee @relation(fields: [employeeId], references: [id])
+  documentTypeId String
+  documentType DocumentType @relation(fields: [documentTypeId], references: [id])
+  assignmentId String
+  assignment Assignment @relation(fields: [assignmentId], references: [id])
+  ruleId String
+  rule Rule @relation(fields: [ruleId], references: [id])
+  cycleId String?
+  cycle Cycle? @relation(fields: [cycleId], references: [id])
+  kind String
+  reviewIndex Int?
+  dueDate String
+  status String @default("OPEN")
+  fulfilledDate String?
+  revision Int @default(1)
+  createdAt DateTime @default(now())
+  submissions Submission[]
+  events NotificationEvent[]
+  @@index([status, dueDate])
+  @@map("hhrr_obligations")
+}
+model Submission {
+  assignedReviewerId String?
+  id String @id @default(uuid())
+  employeeId String
+  employee Employee @relation(fields: [employeeId], references: [id])
+  obligationId String
+  obligation Obligation @relation(fields: [obligationId], references: [id])
+  status String @default("PENDING")
+  issueDate String?
+  expiresDate String?
+  submittedAt DateTime @default(now())
+  receivedDate String
+  reviewedAt DateTime?
+  reviewerId String?
+  reason String?
+  origin String @default("UPLOAD")
+  files Attachment[]
+  @@index([status])
+  @@map("hhrr_submissions")
+}
+model Attachment {
+  id String @id @default(uuid())
+  submissionId String
+  submission Submission @relation(fields: [submissionId], references: [id])
+  filename String
+  storageKey String @unique
+  mime String
+  size Int
+  sha256 String
+  @@map("hhrr_attachments")
+}
+model Challenge {
+  id String @id @default(uuid())
+  employeeId String?
+  identifier String
+  ipKey String
+  codeHash String
+  attempts Int @default(0)
+  expiresAt DateTime
+  consumed Boolean @default(false)
+  createdAt DateTime @default(now())
+  @@index([identifier, createdAt])
+  @@map("hhrr_legacy_challenges")
+}
+model Session {
+  id String @id
+  employeeId String
+  employee Employee @relation(fields: [employeeId], references: [id])
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  @@map("hhrr_legacy_sessions")
+}
+model Notification {
+  accountId String?
+  readAt DateTime?
+  id String @id @default(uuid())
+  key String @unique
+  kind String
+  employeeId String?
+  recipients String
+  subject String
+  html String
+  text String
+  status String @default("PENDING")
+  attempts Int @default(0)
+  providerId String? @unique
+  firstAttemptAt DateTime?
+  leaseUntil DateTime?
+  nextAttemptAt DateTime @default(now())
+  error String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  events NotificationEvent[]
+  @@index([status, nextAttemptAt])
+  @@map("hhrr_notifications")
+}
+model NotificationEvent {
+  id String @id @default(uuid())
+  obligationId String
+  obligation Obligation @relation(fields: [obligationId], references: [id])
+  stage String
+  status String @default("QUEUED")
+  notificationId String?
+  notification Notification? @relation(fields: [notificationId], references: [id])
+  @@unique([obligationId, stage])
+  @@map("hhrr_notification_events")
+}
+model WebhookEvent {
+  id String @id
+  createdAt DateTime @default(now())
+  @@map("hhrr_webhook_events")
+}
+model Audit {
+  id String @id @default(uuid())
+  actorId String?
+  action String
+  entityId String
+  detail String
+  createdAt DateTime @default(now())
+  @@map("hhrr_audits")
+}
+model ImportBatch {
+  id String @id @default(uuid())
+  filename String
+  hash String @unique
+  status String @default("PREVIEW")
+  createdAt DateTime @default(now())
+  rows ImportRow[]
+  @@map("hhrr_import_batches")
+}
+model ImportRow {
+  id String @id @default(uuid())
+  batchId String
+  batch ImportBatch @relation(fields: [batchId], references: [id])
+  rowNumber Int
+  payload String
+  issues String
+  status String @default("PENDING")
+  employeeId String?
+  @@unique([batchId, rowNumber])
+  @@map("hhrr_import_rows")
+}
+model Setting {
+  key String @id
+  value String
+  @@map("hhrr_settings")
+}
+model Lease {
+  key String @id
+  owner String
+  until DateTime
+  @@map("hhrr_leases")
+}
+
+model PlatformUser {
+  id String @id
+  name String
+  email String @unique
+  emailVerified Boolean @default(false)
+  image String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  role String @default("EMPLOYEE")
+  active Boolean @default(true)
+  employeeId String? @unique
+  employee Employee? @relation(fields: [employeeId], references: [id])
+  twoFactorEnabled Boolean @default(false)
+  sessions AuthSession[]
+  accounts AuthAccount[]
+  twoFactors TwoFactor[]
+  @@map("hhrr_users")
+}
+model AuthSession {
+  id String @id
+  token String @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId String
+  user PlatformUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([userId])
+  @@map("hhrr_sessions")
+}
+model AuthAccount {
+  id String @id
+  accountId String
+  providerId String
+  userId String
+  user PlatformUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken String?
+  refreshToken String?
+  idToken String?
+  accessTokenExpiresAt DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope String?
+  password String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([userId])
+  @@unique([providerId, accountId])
+  @@map("hhrr_auth_accounts")
+}
+model AuthVerification {
+  id String @id
+  identifier String
+  value String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([identifier])
+  @@map("hhrr_verifications")
+}
+model TwoFactor {
+  id String @id
+  secret String
+  backupCodes String
+  verified Boolean @default(false)
+  failedVerificationCount Int @default(0)
+  lockedUntil DateTime?
+  userId String
+  user PlatformUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([userId])
+  @@map("hhrr_two_factors")
+}
+model AuthRateLimit {
+  id String @id @default(uuid())
+  key String @unique
+  count Int
+  lastRequest BigInt
+  @@map("hhrr_rate_limits")
+}
+model Activation {
+  id String @id @default(uuid())
+  tokenHash String @unique
+  userId String?
+  purpose String
+  expiresAt DateTime
+  consumedAt DateTime?
+  createdAt DateTime @default(now())
+  @@map("hhrr_activations")
+}
+model UploadSession {
+  id String @id @default(uuid())
+  actorId String
+  obligationId String?
+  purpose String @default("DOCUMENT")
+  manifest String
+  status String @default("PREPARED")
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  @@index([status, expiresAt])
+  @@map("hhrr_upload_sessions")
+}
+model ExportJob {
+  id String @id @default(uuid())
+  actorId String
+  filename String
+  storageKey String
+  mime String
+  filters String
+  rowCount Int
+  createdAt DateTime @default(now())
+  @@map("hhrr_export_jobs")
+}
+model DailySnapshot {
+  date String @id
+  metrics String
+  createdAt DateTime @default(now())
+  @@map("hhrr_daily_snapshots")
+}

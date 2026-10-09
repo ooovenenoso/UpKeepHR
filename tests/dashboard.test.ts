@@ -1,0 +1,73 @@
+import test,{after} from "node:test";
+import assert from "node:assert/strict";
+import {randomUUID} from "node:crypto";
+if(!process.env.DATABASE_URL){process.loadEnvFile(".env.local");process.loadEnvFile(process.env.APP_ENV_FILE!);}
+assert.equal(process.env.DATABASE_SCHEMA,"hhrr_test");process.env.STORAGE_PROVIDER="local";
+const {db}=await import("../src/lib/db");
+const {saveDocument,saveEmployee,openCycle}=await import("../src/lib/compliance");
+const {currentRequirements,complianceSummary}=await import("../src/lib/dashboard");
+const {bulkAssignments}=await import("../src/lib/bulk-assignments");
+const {matchesCurrent}=await import("../src/lib/filtering");
+const {advancedReport}=await import("../src/lib/advanced-reports");
+const {localDate,addDays}=await import("../src/lib/domain");
+type Actor=Parameters<typeof bulkAssignments>[0];
+const actor={id:randomUUID(),accountId:randomUUID(),role:"SUPERADMIN"} as Actor;
+test("Current compliance excludes fulfilled historical cycles and bulk previews are idempotent",async()=>{
+ const employee=await saveEmployee(actor,{cpid:`D-${randomUUID().slice(0,8)}`,name:"Dashboard prueba",lastNames:"Prueba",email:`dash-${randomUUID()}@example.test`,site:`DASH-${randomUUID()}`,position:"Maestra",hireDate:localDate(),active:true});
+ const doc=await saveDocument(actor,{name:`Dashboard ${randomUUID()}`,description:"Prueba",instructions:"PDF",autoAssign:false,expiryMode:"PROVIDED",validityMonths:12,initialDays:30,calendarMode:"CLAMP",reviewMonths:null,reviewCount:null,reviewTargetId:null,reminders:[10,5,0],overdueDays:7,sites:[],positions:[]});
+ const input={documentTypeId:doc.id,site:employee.site,position:"",dueDate:""},preview=await bulkAssignments(actor,input);assert.equal(preview.rows.length,1);assert.equal(preview.rows[0].alreadyAssigned,false);
+ await assert.rejects(()=>bulkAssignments(actor,{...input,digest:"wrong"},true),/vista previa/);
+ await bulkAssignments(actor,{...input,digest:preview.digest},true);
+ let p=await bulkAssignments(actor,input);assert.equal(p.rows[0].alreadyAssigned,true);await bulkAssignments(actor,{...input,digest:p.digest},true);assert.equal(await db.obligation.count({where:{employeeId:employee.id,documentTypeId:doc.id}}),1);
+ const first=await db.obligation.findFirstOrThrow({where:{employeeId:employee.id,documentTypeId:doc.id}});
+ await db.obligation.update({where:{id:first.id},data:{dueDate:addDays(localDate(),-1)}});
+ const missing=complianceSummary(await currentRequirements(actor,new URLSearchParams({employee:employee.id,document:doc.id})));
+ assert.equal(missing.initialOverdue,1);assert.equal(missing.expiredCertificates,0,"A missed first delivery is not an expired certificate");assert.equal(missing.expired,1);
+ await db.$transaction(async tx=>{await openCycle(tx,employee,first,addDays(localDate(),-400),addDays(localDate(),-1),"TEST");await tx.obligation.update({where:{id:first.id},data:{status:"FULFILLED",fulfilledDate:addDays(localDate(),-400)}});});
+ const params=new URLSearchParams({site:employee.site});let rows=await currentRequirements(actor,params);assert.equal(rows.length,1);assert.equal(rows[0].compliant,false,"Historical fulfillment does not make an expired certificate current");
+ const renewal=await db.obligation.findFirstOrThrow({where:{employeeId:employee.id,documentTypeId:doc.id,kind:"RENEWAL",status:"OPEN"}});
+ await db.$transaction(async tx=>{await openCycle(tx,employee,renewal,localDate(),addDays(localDate(),365),"TEST");await tx.obligation.update({where:{id:renewal.id},data:{status:"FULFILLED",fulfilledDate:localDate()}});});
+ rows=await currentRequirements(actor,params);assert.equal(rows[0].compliant,true);assert.equal(rows[0].state,"VIGENTE");assert.ok(matchesCurrent(rows[0],{state:"CUMPLIDA",site:employee.site}));assert.ok(matchesCurrent(rows[0],{documentTypeId:doc.id}));assert.equal((await currentRequirements(actor,new URLSearchParams({site:employee.site,state:"CUMPLIDA"}))).length,1);
+ p=await bulkAssignments(actor,input);assert.equal(p.rows[0].alreadyAssigned,true);
+});
+after(()=>db.$disconnect());
+
+test("Actual expiry remains overdue during RH review; categories and filters share current rows",async()=>{
+ const site=`REAL-${randomUUID()}`;
+ const employee=await saveEmployee(actor,{cpid:`R-${randomUUID().slice(0,8)}`,name:"Realidad prueba",lastNames:"Prueba",email:`real-${randomUUID()}@example.test`,site,position:"Maestra",hireDate:localDate(),active:true});
+ const doc=await saveDocument(actor,{name:`Vigencia ${randomUUID()}`,description:"Prueba",instructions:"PDF",autoAssign:false,expiryMode:"PROVIDED",validityMonths:12,initialDays:30,calendarMode:"CLAMP",reviewMonths:null,reviewCount:null,reviewTargetId:null,reminders:[10,5,0],overdueDays:7,sites:[],positions:[]});
+ const p=await bulkAssignments(actor,{documentTypeId:doc.id,site,position:"",dueDate:""});await bulkAssignments(actor,{documentTypeId:doc.id,site,position:"",dueDate:"",digest:p.digest},true);
+ const initial=await db.obligation.findFirstOrThrow({where:{employeeId:employee.id,documentTypeId:doc.id}});
+ await db.$transaction(async tx=>{await openCycle(tx,employee,initial,addDays(localDate(),-400),addDays(localDate(),-1));await tx.obligation.update({where:{id:initial.id},data:{status:"FULFILLED"}});});
+ const renewal=await db.obligation.findFirstOrThrow({where:{employeeId:employee.id,documentTypeId:doc.id,kind:"RENEWAL"}});
+ await db.submission.create({data:{employeeId:employee.id,obligationId:renewal.id,receivedDate:localDate()}});
+ const rows=await currentRequirements(actor,new URLSearchParams({employee:employee.id,documentTypeId:doc.id}));assert.equal(rows.length,1);assert.equal(rows[0].state,"VENCIDA");assert.equal(rows[0].pendingReview,true);assert.equal(rows[0].overdue,true);assert.equal(rows[0].compliant,false);
+ assert.equal(rows[0].expiryDays,-1);
+ const summary=complianceSummary(rows);assert.equal(summary.expired,1);assert.equal(summary.compliant+summary.expired+summary.reviewing+summary.pendingRequirements,summary.requirements);
+ assert(matchesCurrent(rows[0],{state:"VENCIDA"}));assert.equal((await currentRequirements(actor,new URLSearchParams({employee:employee.id,state:"VIGENTE"}))).length,0);
+});
+
+test("Imported Ley 300 history contributes without attachments and remains distinct from new approval",async()=>{
+ const today="2026-10-07",site=`LEGACY-${randomUUID()}`;
+ let doc=await db.documentType.findUnique({where:{code:"LEY300"},include:{rules:{orderBy:{version:"desc"},take:1}}});
+ if(!doc)doc=await db.documentType.create({data:{code:"LEY300",name:"Ley 300",description:"Historia importada",instructions:"Certificación",autoAssign:false,rules:{create:{version:1,expiryMode:"CALCULATED",validityMonths:60,initialDays:30,calendarMode:"ANNIVERSARY",reviewMonths:12,reviewCount:4}}},include:{rules:true}});
+ const employee=await saveEmployee(actor,{cpid:`L-${randomUUID().slice(0,8)}`,name:"Historia prueba",lastNames:"Prueba",email:`legacy-${randomUUID()}@example.test`,site,position:"Maestra",hireDate:"2024-01-01",active:true});
+ const legacy={documents:{LEY300:{issueDate:"2024-02-29",expiresDate:"2029-03-01",issueDerived:true}},revisions:["2024-03-03","2025-03-04","2026-03-02",null,null]};
+ await db.employee.update({where:{id:employee.id},data:{source:"IMPORT",legacyData:JSON.stringify(legacy)}});
+ const assignment=await db.assignment.upsert({where:{employeeId_documentTypeId:{employeeId:employee.id,documentTypeId:doc.id}},update:{},create:{employeeId:employee.id,documentTypeId:doc.id,ruleId:doc.rules[0].id,assignedDate:today}});
+ const initial=await db.obligation.create({data:{key:randomUUID(),employeeId:employee.id,documentTypeId:doc.id,ruleId:doc.rules[0].id,assignmentId:assignment.id,kind:"INITIAL",dueDate:"2030-01-01"}});
+ const params=new URLSearchParams({employee:employee.id,document:doc.id});
+ let rows=await currentRequirements(actor,params,today),summary=complianceSummary(rows);
+ assert.equal(rows[0].state,"VIGENTE");assert.equal(rows[0].verified,false);assert.equal(rows[0].law!.year,3);assert.equal(summary.percent,100);assert.equal(summary.attachmentCount,0);assert.equal(summary.historicalRequirements,1);
+ assert.equal(await db.cycle.count({where:{employeeId:employee.id,documentTypeId:doc.id}}),0,"Reading history must not activate an unverified cycle");
+ assert.equal(await db.submission.count({where:{employeeId:employee.id,status:"APPROVED"}}),0,"A historic record is not a fabricated new approval");
+ const report=await advancedReport(actor,params);assert.equal(report.rows[0][4],"VIGENTE");assert.equal(report.rows[0][6],"Histórico importado");assert.equal(report.rows[0][7],0);
+ const submission=await db.submission.create({data:{employeeId:employee.id,obligationId:initial.id,receivedDate:today,files:{create:{filename:"nuevo.pdf",storageKey:`test-${randomUUID()}`,mime:"application/pdf",size:500,sha256:"test-hash"}}}});
+ rows=await currentRequirements(actor,params,today);summary=complianceSummary(rows);assert.equal(summary.percent,100);assert.equal(summary.attachmentCount,1);assert.equal(summary.pending,1,"A new delivery is counted separately while history stays valid");assert.equal(submission.status,"PENDING");
+ legacy.revisions[2]=null;await db.employee.update({where:{id:employee.id},data:{legacyData:JSON.stringify(legacy)}});
+ rows=await currentRequirements(actor,params,today);summary=complianceSummary(rows);assert.equal(rows[0].state,"REVISION_VENCIDA");assert.equal(summary.compliant,0);assert.equal(summary.expiredCertificates,0);assert.equal(summary.overdueReviews,1);assert.equal(summary.expired,1);
+ assert.equal(complianceSummary([]).percent,null,"No records must not be displayed as 0% compliance");
+ legacy.revisions[0]="2024-02-01";await db.employee.update({where:{id:employee.id},data:{legacyData:JSON.stringify(legacy)}});
+ rows=await currentRequirements(actor,params,today);summary=complianceSummary(rows);
+ assert.equal(summary.unknownLaw,0,"An uncertain delivery does not make the known cycle year unknown");assert.equal(summary.uncertainLawHistory,1);assert.equal(rows[0].law!.periods[0].deliveredDate,"2024-02-01","Keep the original conflicting date visible");
+});

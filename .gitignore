@@ -1,0 +1,16 @@
+node_modules/
+.next/
+.env*
+!.env.example
+src/generated/
+*.tsbuildinfo
+next-env.d.ts
+test-results/
+.vercel/
+dist/
+coverage/
+*.log
+backups/
+uploads/
+provision-state.json
+activar-superadmin.html

@@ -1,0 +1,42 @@
+name: Validar RH
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: rh_ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      CI: "true"
+      DATABASE_URL: postgresql://postgres:ci-only-password@localhost:5432/rh_ci
+      DATABASE_SCHEMA: hhrr_test
+      APP_MODE: local
+      APP_URL: http://127.0.0.1:3000
+      EMAIL_ENABLED: "false"
+      EMAIL_PROVIDER: preview
+      STORAGE_PROVIDER: local
+      BETTER_AUTH_SECRET: isolated-ci-secret-for-tests-at-least-32-characters # gitleaks:allow -- synthetic isolated CI credential
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npx tsx scripts/ci-test-db.ts
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build

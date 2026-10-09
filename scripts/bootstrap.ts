@@ -1,0 +1,12 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+const env = path.join(process.env.LOCALAPPDATA!,"UpKeepHR","cloud","production.env");
+process.loadEnvFile(env);
+const { db } = await import("../src/lib/db");
+const { createActivation } = await import("../src/lib/platform-users");
+if (await db.platformUser.count({where:{role:"SUPERADMIN"}})) throw new Error("Ya existe un superadmin.");
+const url = await createActivation(null,"BOOTSTRAP");
+const output = path.join(process.env.LOCALAPPDATA!,"UpKeepHR","cloud","activar-superadmin.html");
+await fs.writeFile(output,`<!doctype html><html lang="es"><meta charset="utf-8"><title>Activar superadmin UpKeepHR</title><body style="font:18px system-ui;padding:48px"><h1>UpKeepHR</h1><p>Enlace privado de un solo uso. Válido durante 24 horas.</p><a href="${url}">Configurar mi cuenta de superadmin</a></body></html>`,{mode:0o600});
+console.log(`Alta inicial preparada en: ${output}`);
+await db.$disconnect();
